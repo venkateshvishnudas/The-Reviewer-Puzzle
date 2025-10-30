@@ -1,6 +1,0 @@
-{
-  "model":"intfloat\/e5-base-v2",
-  "count":618,
-  "dim":768,
-  "file":"data\\cache\\embeddings\\intfloat__e5-base-v2\\doc_embeddings.npy"
-}
