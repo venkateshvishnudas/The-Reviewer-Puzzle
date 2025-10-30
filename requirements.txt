@@ -1,0 +1,33 @@
+# ===============================
+# Reviewer Recommendation System
+# ===============================
+
+# ---- Core Libraries ----
+pandas==2.2.2
+numpy==1.26.4
+scikit-learn==1.5.2
+joblib==1.4.2
+scipy==1.13.1
+
+# ---- NLP & Embeddings ----
+torch==2.4.1
+transformers==4.45.2
+sentence-transformers==3.1.1
+
+# ---- PDF Processing ----
+PyPDF2==3.0.1
+
+# ---- Visualization ----
+matplotlib==3.9.2
+
+# ---- Web App ----
+streamlit==1.39.0
+
+# ---- (Optional) Topic Modeling ----
+gensim==4.3.3
+
+# ---- (Optional) Text Preprocessing ----
+nltk==3.9.1
+
+# ---- Misc / Safety ----
+tqdm==4.66.5
