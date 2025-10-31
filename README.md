@@ -3,6 +3,8 @@ Reviewer Recommendation System
 
 Built with: TF-IDF • Sentence-Transformers (E5-base) • Streamlit • Scikit-learn • Matplotlib
 
+Please find the attached deployed link: https://huggingface.co/spaces/venkateshvish/The-Reviewer-Puzzle
+
 📘 Overview
 
 Finding the right reviewers for research submissions can be complex, especially in interdisciplinary fields.
