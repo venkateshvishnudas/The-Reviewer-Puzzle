@@ -6,7 +6,7 @@ joblib==1.4.2
 scipy==1.13.1
 
 # ---- NLP & Embeddings ----
-# Don't pin torch! Let sentence-transformers install the compatible CPU backend.
+# ✅ Do NOT pin torch — sentence-transformers will install a compatible CPU wheel automatically.
 sentence-transformers==3.1.1
 transformers==4.45.2
 
@@ -20,6 +20,7 @@ matplotlib==3.9.2
 streamlit==1.39.0
 
 # ---- (Optional) Topic Modeling ----
+# ✅ Gensim works up to Python 3.12; compatible with 3.11 too.
 gensim==4.3.3
 
 # ---- (Optional) Text Preprocessing ----
