@@ -1,79 +1,71 @@
 """
 evaluate_models.py
 ==================
-Strict version (2025-10)
+Final 2025-10 Edition — Hugging Face–safe
 
-Dynamic evaluation of reviewer recommendation models.
+🧩 Evaluates all reviewer recommendation models:
+   - TF-IDF
+   - Semantic (E5)
+   - Hybrid
+   - Topic (LDA/NMF)
 
-✅ No dependency on manual labels
-✅ No overwriting of CSVs (timestamped exports)
-✅ True pairwise model correlation (no synthetic averages)
-✅ Clean, Streamlit-compatible interface
-✅ Headless-safe plotting (Agg backend)
+✅ Timestamped CSV exports (no overwriting)
+✅ Independent pairwise model correlations
+✅ Streamlit & Spaces compatible (Agg backend)
+✅ Skips missing models gracefully
 """
 
 from __future__ import annotations
 import io
 import sys
-import argparse
 from pathlib import Path
-from typing import Dict, Tuple
+from datetime import datetime
 import pandas as pd
 import numpy as np
-from PyPDF2 import PdfReader
 from scipy.stats import pearsonr, spearmanr
-from datetime import datetime
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from PyPDF2 import PdfReader
 
-# -------------------------------
-# Import models
-# -------------------------------
+# -----------------------------------------------------------------------------
+# 📁 Path Setup
+# -----------------------------------------------------------------------------
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+APP_ROOT = PROJECT_ROOT.parent if (PROJECT_ROOT / "src").exists() else PROJECT_ROOT
+DATA_DIR = APP_ROOT / "data"
+TEST_PDF_DIR = APP_ROOT / "test_pdfs"
+EVAL_DIR = DATA_DIR / "eval"
+
+for d in [DATA_DIR, TEST_PDF_DIR, EVAL_DIR]:
+    d.mkdir(parents=True, exist_ok=True)
+
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
 
+# -----------------------------------------------------------------------------
+# 🔧 Imports
+# -----------------------------------------------------------------------------
 from src.find_reviewers import find_top_reviewers as tfidf_model
 from src.find_reviewers_semantic import find_top_reviewers as semantic_model
 from src.find_reviewers_hybrid import hybrid_recommendation
+from src.find_reviewers_topic import find_top_reviewers_topic  # ✅ Topic model included
 
-# -------------------------------
-# Paths
-# -------------------------------
-DEFAULT_PDF_DIR = PROJECT_ROOT / "data" / "test_pdfs"
-EVAL_DIR = PROJECT_ROOT / "data" / "eval"
-EVAL_DIR.mkdir(parents=True, exist_ok=True)
-
-# -------------------------------
-# Utility functions
-# -------------------------------
-def _normalize_author(s: str) -> str:
-    """Normalize author names for fuzzy matching."""
-    if not isinstance(s, str):
-        return ""
-    s = s.lower()
-    for bad in ["dr.", "dr", "prof.", "prof", "ph.d", "phd", "mr.", "mrs.", "ms."]:
-        s = s.replace(bad, " ")
-    s = s.replace(".", " ").replace(",", " ").replace("_", " ")
-    s = "".join(ch for ch in s if ch.isalnum() or ch.isspace())
-    s = " ".join(s.split())
-    return s.strip()
-
-
-def extract_text_from_pdf(path: Path | io.BytesIO, max_chars: int = 4000) -> str:
-    """Extract text from a PDF file (either file path or bytes)."""
+# -----------------------------------------------------------------------------
+# 🧹 Utilities
+# -----------------------------------------------------------------------------
+def extract_text_from_pdf(path: Path, max_chars: int = 4000) -> str:
+    """Extract readable text from a PDF file."""
     try:
-        reader = PdfReader(path if isinstance(path, (str, Path)) else io.BytesIO(path))
+        reader = PdfReader(path)
         text = "\n".join([page.extract_text() or "" for page in reader.pages])
         return text[:max_chars]
     except Exception as e:
-        print(f"⚠️ Error reading PDF: {e}")
+        print(f"⚠️ Error reading PDF {path.name}: {e}")
         return ""
 
-
 def _normalize_similarity_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Ensure a consistent 'similarity' column exists in model outputs."""
+    """Ensure uniform column naming for similarity."""
     df = df.copy()
     if "similarity" not in df.columns:
         if "score" in df.columns:
@@ -82,27 +74,28 @@ def _normalize_similarity_columns(df: pd.DataFrame) -> pd.DataFrame:
             df.rename(columns={"hybrid_similarity": "similarity"}, inplace=True)
     return df
 
-
-# -------------------------------
-# Plotting
-# -------------------------------
-def fig_similarity_hist(tfidf_df, sem_df, hyb_df):
-    """Histogram of similarity score distributions."""
+# -----------------------------------------------------------------------------
+# 📊 Visualization
+# -----------------------------------------------------------------------------
+def fig_similarity_hist(tfidf_df, sem_df, hyb_df, topic_df):
     fig = plt.figure(figsize=(6, 4))
-    plt.hist(tfidf_df["similarity"].dropna(), bins=20, alpha=0.5, density=True, label="TF-IDF")
-    plt.hist(sem_df["similarity"].dropna(), bins=20, alpha=0.5, density=True, label="Semantic (E5)")
-    plt.hist(hyb_df["similarity"].dropna(), bins=20, alpha=0.5, density=True, label="Hybrid")
+    for df, label in [
+        (tfidf_df, "TF-IDF"),
+        (sem_df, "Semantic (E5)"),
+        (hyb_df, "Hybrid"),
+        (topic_df, "Topic (LDA/NMF)"),
+    ]:
+        if not df.empty and "similarity" in df.columns:
+            plt.hist(df["similarity"].dropna(), bins=20, alpha=0.5, density=True, label=label)
     plt.xlabel("Similarity Score")
     plt.ylabel("Density")
     plt.legend()
-    plt.title("Model Similarity Distribution")
+    plt.title("Model Similarity Distributions")
     plt.tight_layout()
     return fig
 
-
 def fig_corr_heatmap(corr_df):
-    """Visualize correlation matrix."""
-    fig, ax = plt.subplots(figsize=(5, 4))
+    fig, ax = plt.subplots(figsize=(6, 5))
     im = ax.imshow(corr_df.values, cmap="YlGnBu", aspect="auto", vmin=0.0, vmax=1.0)
     plt.colorbar(im, fraction=0.046, pad=0.04)
     ax.set_xticks(range(len(corr_df.columns)))
@@ -111,23 +104,25 @@ def fig_corr_heatmap(corr_df):
     ax.set_yticklabels(corr_df.index)
     for i in range(corr_df.shape[0]):
         for j in range(corr_df.shape[1]):
-            ax.text(j, i, f"{corr_df.iloc[i, j]:.2f}", ha="center", va="center", color="black")
-    plt.title("Model-to-Model Correlation")
+            val = corr_df.iloc[i, j]
+            if not np.isnan(val):
+                ax.text(j, i, f"{val:.2f}", ha="center", va="center", color="black")
+    plt.title("Model-to-Model Correlation Matrix")
     plt.tight_layout()
     return fig
 
-
-# -------------------------------
-# Batch Evaluation (no manual labels)
-# -------------------------------
+# -----------------------------------------------------------------------------
+# 🧩 Batch Evaluation
+# -----------------------------------------------------------------------------
 def export_results(pdf_dir: Path, top_k: int = 5):
-    """Run all models on PDFs in a folder and save CSV outputs (timestamped)."""
+    """Run all models on PDFs and export timestamped CSVs."""
+    pdf_dir = Path(pdf_dir).expanduser().resolve()
     pdf_files = sorted(list(pdf_dir.glob("*.pdf")))
-    print(f"📂 Found {len(pdf_files)} PDFs for evaluation in {pdf_dir}")
+    print(f"📂 Found {len(pdf_files)} PDFs in {pdf_dir}")
     if not pdf_files:
-        raise FileNotFoundError("No PDFs found in folder.")
+        raise FileNotFoundError("❌ No PDFs found in folder.")
 
-    all_tfidf, all_sem, all_hyb = [], [], []
+    all_tfidf, all_sem, all_hyb, all_topic = [], [], [], []
 
     for pdf in pdf_files:
         print(f"\n📄 Processing {pdf.name}...")
@@ -138,45 +133,52 @@ def export_results(pdf_dir: Path, top_k: int = 5):
 
         try:
             res_tfidf = _normalize_similarity_columns(tfidf_model(query_text, top_k=top_k))
-            res_sem = _normalize_similarity_columns(semantic_model(query_text, top_k=top_k))
-            res_hyb = _normalize_similarity_columns(hybrid_recommendation(query_text, alpha=0.4, top_k=top_k))
+            res_sem   = _normalize_similarity_columns(semantic_model(query_text, top_k=top_k))
+            res_hyb   = _normalize_similarity_columns(hybrid_recommendation(query_text, alpha=0.4, top_k=top_k))
+            res_topic = _normalize_similarity_columns(find_top_reviewers_topic(query_text, top_k=top_k, model="lda"))
 
-            for df, lst in [(res_tfidf, all_tfidf), (res_sem, all_sem), (res_hyb, all_hyb)]:
-                df["query_id"] = pdf.stem
-                lst.append(df)
+            for df, store in [
+                (res_tfidf, all_tfidf),
+                (res_sem, all_sem),
+                (res_hyb, all_hyb),
+                (res_topic, all_topic),
+            ]:
+                if not df.empty:
+                    df["query_id"] = pdf.stem
+                    store.append(df)
 
         except Exception as e:
             print(f"❌ Error evaluating {pdf.name}: {e}")
             continue
 
-    if not all_tfidf or not all_sem or not all_hyb:
-        raise RuntimeError("❌ No valid results generated from models.")
+    # Combine and export
+    def concat_or_empty(lst):
+        return pd.concat(lst, ignore_index=True) if lst else pd.DataFrame()
 
-    tfidf_df = pd.concat(all_tfidf, ignore_index=True)
-    sem_df = pd.concat(all_sem, ignore_index=True)
-    hyb_df = pd.concat(all_hyb, ignore_index=True)
+    tfidf_df, sem_df, hyb_df, topic_df = map(concat_or_empty, [all_tfidf, all_sem, all_hyb, all_topic])
 
-    # Timestamped exports
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    tfidf_path = EVAL_DIR / f"tfidf_results_{timestamp}.csv"
-    sem_path = EVAL_DIR / f"semantic_results_{timestamp}.csv"
-    hyb_path = EVAL_DIR / f"hybrid_results_{timestamp}.csv"
+    for name, df in [
+        ("tfidf", tfidf_df),
+        ("semantic", sem_df),
+        ("hybrid", hyb_df),
+        ("topic", topic_df),
+    ]:
+        if not df.empty:
+            out_path = EVAL_DIR / f"{name}_results_{timestamp}.csv"
+            df.to_csv(out_path, index=False)
+            print(f"💾 Saved {name} results → {out_path}")
 
-    tfidf_df.to_csv(tfidf_path, index=False)
-    sem_df.to_csv(sem_path, index=False)
-    hyb_df.to_csv(hyb_path, index=False)
+    return tfidf_df, sem_df, hyb_df, topic_df
 
-    print(f"✅ Exported CSVs → {EVAL_DIR} (timestamped)")
-    return tfidf_df, sem_df, hyb_df
-
-
-# -------------------------------
-# Correlation Helper
-# -------------------------------
+# -----------------------------------------------------------------------------
+# 📈 Correlation Computation
+# -----------------------------------------------------------------------------
 def model_correlation(df1: pd.DataFrame, df2: pd.DataFrame):
-    """Compute Pearson & Spearman correlation between models."""
     df1 = _normalize_similarity_columns(df1)
     df2 = _normalize_similarity_columns(df2)
+    if df1.empty or df2.empty:
+        return np.nan, np.nan
     merged = df1.merge(df2, on=["query_id", "author_id"], suffixes=("_1", "_2"))
     if merged.empty:
         return np.nan, np.nan
@@ -184,59 +186,53 @@ def model_correlation(df1: pd.DataFrame, df2: pd.DataFrame):
     spearman = spearmanr(merged["similarity_1"], merged["similarity_2"])[0]
     return float(pearson), float(spearman)
 
-
-# -------------------------------
-# Evaluation Runner
-# -------------------------------
+# -----------------------------------------------------------------------------
+# 🧪 Evaluation Runner
+# -----------------------------------------------------------------------------
 def run_full_evaluation(
-    pdf_dir: Path | str = DEFAULT_PDF_DIR,
+    pdf_dir: Path | str = TEST_PDF_DIR,
     k: int = 5,
     top_k_export: int = 5,
     return_results: bool = True,
     show_plots: bool = False
 ):
-    """Evaluate all models and compute independent pairwise correlations."""
-    pdf_dir = Path(pdf_dir)
-    tfidf_df, sem_df, hyb_df = export_results(pdf_dir, top_k=top_k_export)
+    pdf_dir = Path(pdf_dir).expanduser().resolve()
+    tfidf_df, sem_df, hyb_df, topic_df = export_results(pdf_dir, top_k=top_k_export)
 
-    # Independent pairwise correlation computations
-    pearson_tf_hyb, _ = model_correlation(tfidf_df, hyb_df)
-    pearson_sem_hyb, _ = model_correlation(sem_df, hyb_df)
-    pearson_tf_sem, _ = model_correlation(tfidf_df, sem_df)
+    print("\n🔗 Computing pairwise model correlations...\n")
 
-    corr_df = pd.DataFrame(
-        [
-            [1.0, pearson_tf_hyb, pearson_tf_sem],
-            [pearson_tf_hyb, 1.0, pearson_sem_hyb],
-            [pearson_tf_sem, pearson_sem_hyb, 1.0],
-        ],
-        index=["TF-IDF", "Hybrid", "Semantic (E5)"],
-        columns=["TF-IDF", "Hybrid", "Semantic (E5)"]
-    )
-
-    print("\n🔗 Model Correlation Matrix:")
-    print(corr_df.round(3))
-
-    figs = {
-        "similarity_hist": fig_similarity_hist(tfidf_df, sem_df, hyb_df),
-        "corr_heatmap": fig_corr_heatmap(corr_df)
+    models = {
+        "TF-IDF": tfidf_df,
+        "Semantic (E5)": sem_df,
+        "Hybrid": hyb_df,
+        "Topic (LDA/NMF)": topic_df,
     }
 
+    corr_matrix = pd.DataFrame(index=models.keys(), columns=models.keys(), dtype=float)
+
+    for name1, df1 in models.items():
+        for name2, df2 in models.items():
+            pearson, _ = model_correlation(df1, df2)
+            corr_matrix.loc[name1, name2] = pearson
+
+    figs = {
+        "similarity_hist": fig_similarity_hist(tfidf_df, sem_df, hyb_df, topic_df),
+        "corr_heatmap": fig_corr_heatmap(corr_matrix),
+    }
+
+    print("\n📈 Model-to-Model Correlation Matrix:")
+    print(corr_matrix.round(3))
+
     if return_results:
-        return tfidf_df, sem_df, hyb_df, corr_df, figs
+        return tfidf_df, sem_df, hyb_df, topic_df, corr_matrix, figs
 
-
-# -------------------------------
-# CLI Runner
-# -------------------------------
-def _parse_args():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--pdf_dir", type=str, default=str(DEFAULT_PDF_DIR), help="Folder with PDFs for evaluation")
-    ap.add_argument("--topk", type=int, default=5, help="Top-K reviewers to export per model")
-    return ap.parse_args()
-
-
+# -----------------------------------------------------------------------------
+# 🚀 CLI Mode
+# -----------------------------------------------------------------------------
 if __name__ == "__main__":
-    args = _parse_args()
-    pdf_dir = Path(args.pdf_dir)
-    run_full_evaluation(pdf_dir=pdf_dir, top_k_export=args.topk)
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--pdf_dir", type=str, default=str(TEST_PDF_DIR), help="Folder containing test PDFs")
+    ap.add_argument("--topk", type=int, default=5, help="Top-K reviewers per model")
+    args = ap.parse_args()
+    run_full_evaluation(pdf_dir=args.pdf_dir, top_k_export=args.topk)
