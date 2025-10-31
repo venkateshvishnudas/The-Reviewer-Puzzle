@@ -19,9 +19,7 @@ matplotlib==3.9.2
 # ---- Web App ----
 streamlit==1.39.0
 
-# ---- (Optional) Topic Modeling ----
-# ✅ Gensim works up to Python 3.12; compatible with 3.11 too.
-gensim==4.1.2
+
 # ---- (Optional) Text Preprocessing ----
 nltk==3.9.1
 
