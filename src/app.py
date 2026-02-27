@@ -1,3 +1,4 @@
+
 """
 app.py
 ======
@@ -32,8 +33,8 @@ DATA_DIR = PROJECT_ROOT / "data"
 TEST_PDF_DIR = Path(tempfile.gettempdir()) / "test_pdfs"
 EVAL_DIR = DATA_DIR / "eval"
 
-for d in [DATA_DIR, TEST_PDF_DIR, EVAL_DIR]:
-    d.mkdir(parents=True, exist_ok=True)
+for directory in [DATA_DIR, TEST_PDF_DIR, EVAL_DIR]:
+    directory.mkdir(parents=True, exist_ok=True)
 
 SRC_DIR = PROJECT_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
@@ -67,29 +68,26 @@ def load_topic():
 # -----------------------------------------------
 def run_model(model_choice: str, query_text: str, alpha: float = 0.4) -> pd.DataFrame:
     try:
+        model = None
         if model_choice == "TF-IDF":
             model = load_tfidf()
-            results = model(query_text, top_k=5)
-            results.rename(columns={"score": "similarity"}, inplace=True)
-
         elif model_choice == "Semantic (E5)":
             model = load_semantic()
-            results = model(query_text, top_k=5)
-
         elif model_choice == "Topic (LDA/NMF)":
             model = load_topic()
-            results = model(query_text, top_k=5, model="lda")
-            if results.empty:
-                st.warning("⚠️ No topic model results found.")
-
         elif model_choice == "Hybrid":
             model = load_hybrid()
-            results = model(query_text, alpha=alpha, top_k=5)
-            results.rename(columns={"hybrid_similarity": "similarity"}, inplace=True)
-
         else:
             st.error("⚠️ Unknown model selected.")
             return pd.DataFrame()
+
+        if model_choice == "Hybrid":
+            results = model(query_text, alpha=alpha, top_k=5)
+            results.rename(columns={"hybrid_similarity": "similarity"}, inplace=True)
+        else:
+            results = model(query_text, top_k=5)
+            if model_choice == "TF-IDF" or model_choice == "Hybrid":
+                results.rename(columns={"score": "similarity"}, inplace=True)
 
         return results
 
