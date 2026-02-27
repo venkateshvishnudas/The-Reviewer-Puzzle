@@ -1,16 +1,3 @@
-
-"""
-app.py
-======
-Final Production-Ready Version (2025-10)
-----------------------------------------
-✅ Streamlit + Hugging Face–compatible
-✅ Prevents model reload on every click
-✅ Keeps uploaded PDFs & text in session
-✅ Uses temporary storage for runtime safety
-✅ Evaluates TF-IDF, Semantic, Topic (LDA/NMF), and Hybrid
-"""
-
 import sys
 import tempfile
 import warnings
