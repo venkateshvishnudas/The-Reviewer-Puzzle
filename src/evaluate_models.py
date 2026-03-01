@@ -27,6 +27,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from PyPDF2 import PdfReader
+import shlex
 
 # -----------------------------------------------------------------------------
 # 📁 Path Setup
@@ -235,4 +236,5 @@ if __name__ == "__main__":
     ap.add_argument("--pdf_dir", type=str, default=str(TEST_PDF_DIR), help="Folder containing test PDFs")
     ap.add_argument("--topk", type=int, default=5, help="Top-K reviewers per model")
     args = ap.parse_args()
-    run_full_evaluation(pdf_dir=args.pdf_dir, top_k_export=args.topk)
+    sanitized_pdf_dir = shlex.quote(args.pdf_dir)
+    run_full_evaluation(pdf_dir=sanitized_pdf_dir, top_k_export=args.topk)

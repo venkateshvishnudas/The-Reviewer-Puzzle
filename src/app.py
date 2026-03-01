@@ -1,16 +1,3 @@
-
-"""
-app.py
-======
-Final Production-Ready Version (2025-10)
-----------------------------------------
-✅ Streamlit + Hugging Face–compatible
-✅ Prevents model reload on every click
-✅ Keeps uploaded PDFs & text in session
-✅ Uses temporary storage for runtime safety
-✅ Evaluates TF-IDF, Semantic, Topic (LDA/NMF), and Hybrid
-"""
-
 import sys
 import tempfile
 import warnings
@@ -19,6 +6,7 @@ import streamlit as st
 import pandas as pd
 from PyPDF2 import PdfReader
 from PyPDF2.errors import PdfReadWarning
+import os
 
 # -----------------------------------------------
 # 🧹 Suppress Warnings
@@ -132,7 +120,9 @@ st.session_state.query_text = query_text
 # Handle PDF upload and extraction
 if st.session_state.uploaded_pdf is not None:
     pdf_file = st.session_state.uploaded_pdf
-    save_path = TEST_PDF_DIR / pdf_file.name
+    # Sanitize the file name to prevent path traversal
+    safe_filename = os.path.basename(pdf_file.name)
+    save_path = TEST_PDF_DIR / safe_filename
 
     try:
         with open(save_path, "wb") as f:
