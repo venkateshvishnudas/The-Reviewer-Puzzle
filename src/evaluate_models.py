@@ -27,6 +27,8 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from PyPDF2 import PdfReader
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor  # PERF: Added for parallel execution
+import functools
 
 # -----------------------------------------------------------------------------
 # 📁 Path Setup
@@ -66,13 +68,12 @@ def extract_text_from_pdf(path: Path, max_chars: int = 4000) -> str:
 
 def _normalize_similarity_columns(df: pd.DataFrame) -> pd.DataFrame:
     """Ensure uniform column naming for similarity."""
-    df = df.copy()
     if "similarity" not in df.columns:
         if "score" in df.columns:
             df.rename(columns={"score": "similarity"}, inplace=True)
         elif "hybrid_similarity" in df.columns:
             df.rename(columns={"hybrid_similarity": "similarity"}, inplace=True)
-    return df
+    return df  # PERF: Removed unnecessary df.copy()
 
 # -----------------------------------------------------------------------------
 # 📊 Visualization
@@ -124,12 +125,12 @@ def export_results(pdf_dir: Path, top_k: int = 5):
 
     all_tfidf, all_sem, all_hyb, all_topic = [], [], [], []
 
-    for pdf in pdf_files:
+    def process_pdf(pdf):
         print(f"\n📄 Processing {pdf.name}...")
         query_text = extract_text_from_pdf(pdf)
         if not query_text.strip():
             print(f"⚠️ Skipping {pdf.name} — no extractable text.")
-            continue
+            return None
 
         try:
             res_tfidf = _normalize_similarity_columns(tfidf_model(query_text, top_k=top_k))
@@ -137,6 +138,7 @@ def export_results(pdf_dir: Path, top_k: int = 5):
             res_hyb   = _normalize_similarity_columns(hybrid_recommendation(query_text, alpha=0.4, top_k=top_k))
             res_topic = _normalize_similarity_columns(find_top_reviewers_topic(query_text, top_k=top_k, model="lda"))
 
+            results = []
             for df, store in [
                 (res_tfidf, all_tfidf),
                 (res_sem, all_sem),
@@ -145,11 +147,20 @@ def export_results(pdf_dir: Path, top_k: int = 5):
             ]:
                 if not df.empty:
                     df["query_id"] = pdf.stem
-                    store.append(df)
+                    results.append((df, store))
+            return results
 
         except Exception as e:
             print(f"❌ Error evaluating {pdf.name}: {e}")
-            continue
+            return None
+
+    with ProcessPoolExecutor() as executor:  # PERF: Use ProcessPoolExecutor for parallel PDF processing
+        results = executor.map(process_pdf, pdf_files)
+
+    for result in results:
+        if result:
+            for df, store in result:
+                store.append(df)
 
     # Combine and export
     def concat_or_empty(lst):
@@ -174,6 +185,7 @@ def export_results(pdf_dir: Path, top_k: int = 5):
 # -----------------------------------------------------------------------------
 # 📈 Correlation Computation
 # -----------------------------------------------------------------------------
+@functools.lru_cache(maxsize=None)  # PERF: Cache results of model_correlation for repeated calls
 def model_correlation(df1: pd.DataFrame, df2: pd.DataFrame):
     df1 = _normalize_similarity_columns(df1)
     df2 = _normalize_similarity_columns(df2)
@@ -182,8 +194,10 @@ def model_correlation(df1: pd.DataFrame, df2: pd.DataFrame):
     merged = df1.merge(df2, on=["query_id", "author_id"], suffixes=("_1", "_2"))
     if merged.empty:
         return np.nan, np.nan
-    pearson = pearsonr(merged["similarity_1"], merged["similarity_2"])[0]
-    spearman = spearmanr(merged["similarity_1"], merged["similarity_2"])[0]
+    similarity_1 = merged["similarity_1"].values  # PERF: Cache column access
+    similarity_2 = merged["similarity_2"].values  # PERF: Cache column access
+    pearson = pearsonr(similarity_1, similarity_2)[0]
+    spearman = spearmanr(similarity_1, similarity_2)[0]
     return float(pearson), float(spearman)
 
 # -----------------------------------------------------------------------------
@@ -210,9 +224,15 @@ def run_full_evaluation(
 
     corr_matrix = pd.DataFrame(index=models.keys(), columns=models.keys(), dtype=float)
 
-    for name1, df1 in models.items():
-        for name2, df2 in models.items():
-            pearson, _ = model_correlation(df1, df2)
+    with ThreadPoolExecutor() as executor:  # PERF: Use ThreadPoolExecutor for parallel model correlation
+        futures = {
+            executor.submit(model_correlation, df1, df2): (name1, name2)
+            for name1, df1 in models.items()
+            for name2, df2 in models.items()
+        }
+        for future in futures:
+            name1, name2 = futures[future]
+            pearson, _ = future.result()
             corr_matrix.loc[name1, name2] = pearson
 
     figs = {
@@ -233,6 +253,6 @@ if __name__ == "__main__":
     import argparse
     ap = argparse.ArgumentParser()
     ap.add_argument("--pdf_dir", type=str, default=str(TEST_PDF_DIR), help="Folder containing test PDFs")
-    ap.add_argument("--topk", type=int, default=5, help="Top-K reviewers per model")
+    ap.add_argument("--topk", type=int, default=5, help="Number of top reviewers to select")
     args = ap.parse_args()
     run_full_evaluation(pdf_dir=args.pdf_dir, top_k_export=args.topk)

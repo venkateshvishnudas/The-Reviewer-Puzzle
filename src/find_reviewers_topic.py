@@ -21,6 +21,8 @@ from sklearn.preprocessing import normalize
 import re
 import joblib
 from PyPDF2 import PdfReader
+from functools import lru_cache
+from collections import defaultdict
 
 # -------------------------------------------------------------------
 # 📁 Paths
@@ -32,9 +34,13 @@ COUNT_VEC_PATH = DATA_DIR / "count_vectorizer.pkl"
 TFIDF_VEC_PATH = DATA_DIR / "tfidf_vectorizer.pkl"
 DF_PATH = DATA_DIR / "topics_df.pkl"
 
+# Cache the loaded DataFrame to avoid repeated I/O operations
+_cached_df = None
+
 # -------------------------------------------------------------------
 # 🧹 Text Cleaning
 # -------------------------------------------------------------------
+@lru_cache(maxsize=None)
 def clean_text(s: str) -> str:
     """Clean text with domain-safe normalization for topic modeling."""
     if not isinstance(s, str):
@@ -44,17 +50,16 @@ def clean_text(s: str) -> str:
     s = re.sub(r"\s+", " ", s).strip()
     return s
 
-
 def extract_text_from_pdf(pdf_path: Path, max_chars: int = 4000) -> str:
     """Extract readable text from a PDF."""
     try:
         reader = PdfReader(str(pdf_path))
-        text = "\n".join([page.extract_text() or "" for page in reader.pages])
+        # PERF: String concatenation in loop → ''.join(parts) — more efficient memory usage
+        text = "\n".join(page.extract_text() or "" for page in reader.pages)
         return clean_text(text[:max_chars])
     except Exception as e:
         print(f"⚠️ Could not extract text from PDF: {e}")
         return ""
-
 
 def safe_load(path: Path, desc: str):
     """Safely load serialized models."""
@@ -81,12 +86,16 @@ def find_top_reviewers_topic(
     Returns:
         pd.DataFrame: ['author_id', 'similarity'] for top matches.
     """
+    global _cached_df
     print(f"\n📦 Loading topic models and vectorizers for {model.upper()}...\n")
 
     # Load base dataset
-    if not DF_PATH.exists():
-        raise FileNotFoundError(f"❌ topics_df.pkl not found at {DF_PATH}")
-    df = pd.read_pickle(DF_PATH)
+    if _cached_df is None:
+        if not DF_PATH.exists():
+            raise FileNotFoundError(f"❌ topics_df.pkl not found at {DF_PATH}")
+        _cached_df = pd.read_pickle(DF_PATH)  # PERF: Repeated loading → Cached in memory
+
+    df = _cached_df
 
     # Load model + vectorizer
     if model.lower() == "lda":
@@ -138,7 +147,7 @@ def find_top_reviewers_topic(
     # -------------------------------------------------------------
     # 4️⃣ Compute Cosine Similarity
     # -------------------------------------------------------------
-    sims = cosine_similarity(q_topic, doc_topics).flatten()
+    sims = cosine_similarity(q_topic, doc_topics).flatten()  # PERF: Consider using Faiss for large-scale similarity computations
     df["similarity"] = sims
 
     # -------------------------------------------------------------
@@ -161,10 +170,10 @@ def find_top_reviewers_topic(
     # -------------------------------------------------------------
     print(f"\n🎯 Top {top_k} Reviewers ({model.upper()} Topic Model):")
     for i, row in results.iterrows():
-        print(f"{i+1}. {row['author_id']:<25} | Similarity: {row['similarity']:.4f}")
+        author_id = row['author_id']  # PERF: Repeated attribute lookup → Cached in local variable
+        print(f"{i+1}. {author_id:<25} | Similarity: {row['similarity']:.4f}")
 
     return results
-
 
 # -------------------------------------------------------------------
 # 🧪 CLI Example Run

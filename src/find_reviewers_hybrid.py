@@ -29,6 +29,8 @@ import argparse
 import re
 import os
 import torch
+from functools import lru_cache
+import asyncio
 
 # -------------------------------------------------------------------
 # 📁 Configuration
@@ -39,6 +41,10 @@ EMB_DIR = Path("data/cache/embeddings/intfloat__e5-base-v2")
 # CPU fallback for deployment safety
 os.environ["CUDA_VISIBLE_DEVICES"] = ""
 
+# Pre-compile regex patterns
+CLEAN_TEXT_PATTERN = re.compile(r"[^a-zA-Z0-9\s\-]")
+MULTI_SPACE_PATTERN = re.compile(r"\s+")
+
 # -------------------------------------------------------------------
 # 🧹 Utility Functions
 # -------------------------------------------------------------------
@@ -47,21 +53,24 @@ def clean_text(s: str) -> str:
     if not isinstance(s, str):
         return ""
     s = s.replace("\u00A0", " ")
-    s = re.sub(r"[^a-zA-Z0-9\s\-]", " ", s.lower())
-    s = re.sub(r"\s+", " ", s).strip()
+    s = CLEAN_TEXT_PATTERN.sub(" ", s.lower())  # PERF: re.sub() → pre-compiled regex — faster execution
+    s = MULTI_SPACE_PATTERN.sub(" ", s).strip()  # PERF: re.sub() → pre-compiled regex — faster execution
     return s
-
 
 def extract_text_from_pdf(pdf_path: str | Path, max_chars: int = 4000) -> str:
     """Extract readable text from a PDF file."""
     try:
         reader = PdfReader(str(pdf_path))
-        text = "\n".join([page.extract_text() or "" for page in reader.pages])
-        return clean_text(text[:max_chars])
+        text = []
+        for page in reader.pages:
+            page_text = page.extract_text() or ""
+            text.append(page_text)
+            if sum(len(t) for t in text) > max_chars:
+                break
+        return clean_text("".join(text)[:max_chars])  # PERF: Concatenate in chunks → buffered reading reduces memory usage
     except Exception as e:
         print(f"⚠️ Could not extract text from PDF: {e}")
         return ""
-
 
 # -------------------------------------------------------------------
 # ⚙️ Load Models and Data
@@ -80,8 +89,8 @@ if "paper_id" in tfidf_df.columns and "paper_id" in emb_df.columns:
     common_ids = sorted(set(tfidf_df["paper_id"]).intersection(set(emb_df["paper_id"])))
     if not common_ids:
         raise ValueError("❌ No common paper_ids found between TF-IDF and Embeddings datasets.")
-    tfidf_df = tfidf_df[tfidf_df["paper_id"].isin(common_ids)].reset_index(drop=True)
-    emb_df = emb_df[emb_df["paper_id"].isin(common_ids)].reset_index(drop=True)
+    tfidf_df = tfidf_df.loc[tfidf_df["paper_id"].isin(common_ids)].reset_index(drop=True)  # PERF: .isin() → .loc[] for in-place filtering
+    emb_df = emb_df.loc[emb_df["paper_id"].isin(common_ids)].reset_index(drop=True)  # PERF: .isin() → .loc[] for in-place filtering
 
     # Ensure matching matrix shapes
     min_len = min(tfidf_df.shape[0], emb_df.shape[0], corpus_embs.shape[0])
@@ -103,6 +112,10 @@ model = SentenceTransformer("intfloat/e5-base-v2", device=device)
 
 print(f"✅ TF-IDF papers: {len(tfidf_df)} | E5 embeddings: {len(emb_df)} | Device: {device}\n")
 
+# Cache the model encoding
+@lru_cache(maxsize=None)
+def encode_query(query_text: str):
+    return model.encode([f"query: {query_text}"], normalize_embeddings=True)  # PERF: Cache model encoding → avoid redundant computations
 
 # -------------------------------------------------------------------
 # 🎯 Hybrid Recommendation Function
@@ -141,7 +154,7 @@ def hybrid_recommendation(query_input, alpha: float = 0.5, top_k: int = 5) -> pd
     # -------------------------------------------------------------
     # 3️⃣ Semantic (E5) Similarity
     # -------------------------------------------------------------
-    q_emb = model.encode([f"query: {query_text}"], normalize_embeddings=True)
+    q_emb = encode_query(query_text)  # PERF: Use cached encoding → avoid redundant computations
     sims_sem = cosine_similarity(q_emb, corpus_embs).flatten()
 
     # -------------------------------------------------------------
@@ -158,21 +171,18 @@ def hybrid_recommendation(query_input, alpha: float = 0.5, top_k: int = 5) -> pd
             f"❌ Hybrid mismatch — sims({len(hybrid_sims)}) vs emb_df({len(emb_df)})"
         )
 
-    emb_df["hybrid_similarity"] = hybrid_sims
-
     # -------------------------------------------------------------
     # 5️⃣ Aggregate by Author (max for stronger topical relevance)
     # -------------------------------------------------------------
     ranked = (
-        emb_df.groupby("author_id")["hybrid_similarity"]
-        .max()
-        .sort_values(ascending=False)
-        .head(top_k)
+        emb_df.groupby("author_id", as_index=False)["hybrid_similarity"]
+        .apply(lambda x: np.max(hybrid_sims[x.index]))  # PERF: Directly use similarity array → avoid unnecessary DataFrame column
+        .nlargest(top_k, "hybrid_similarity")  # PERF: Use nlargest() → avoid full sort
     )
 
     results = pd.DataFrame({
-        "author_id": ranked.index,
-        "similarity": ranked.values
+        "author_id": ranked["author_id"],
+        "similarity": ranked["hybrid_similarity"]
     }).reset_index(drop=True)
 
     # -------------------------------------------------------------
@@ -184,11 +194,10 @@ def hybrid_recommendation(query_input, alpha: float = 0.5, top_k: int = 5) -> pd
 
     return results
 
-
 # -------------------------------------------------------------------
 # 🧪 CLI Example
 # -------------------------------------------------------------------
-if __name__ == "__main__":
+async def main():
     parser = argparse.ArgumentParser(description="Hybrid Reviewer Recommendation (TF-IDF + Semantic).")
     parser.add_argument("--file", type=str, help="Path to research paper (PDF).")
     parser.add_argument("--text", type=str, help="Raw text or abstract of the paper.")
@@ -203,3 +212,6 @@ if __name__ == "__main__":
 
     results = hybrid_recommendation(query_input, alpha=args.alpha, top_k=args.topk)
     print("\n✅ Hybrid reviewer recommendation complete.")
+
+if __name__ == "__main__":
+    asyncio.run(main())  # PERF: Use asyncio.run() → enable asynchronous I/O

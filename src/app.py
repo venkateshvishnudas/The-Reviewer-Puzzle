@@ -19,6 +19,8 @@ import streamlit as st
 import pandas as pd
 from PyPDF2 import PdfReader
 from PyPDF2.errors import PdfReadWarning
+from concurrent.futures import ThreadPoolExecutor  # PERF: Added for concurrent execution of model evaluations
+import io  # PERF: Added for in-memory file operations
 
 # -----------------------------------------------
 # 🧹 Suppress Warnings
@@ -44,39 +46,28 @@ if str(SRC_DIR) not in sys.path:
 # ⚙️ Caching Model Imports
 # -----------------------------------------------
 @st.cache_resource
-def load_tfidf():
-    from src.find_reviewers import find_top_reviewers
-    return find_top_reviewers
-
-@st.cache_resource
-def load_semantic():
-    from src.find_reviewers_semantic import find_top_reviewers
-    return find_top_reviewers
-
-@st.cache_resource
-def load_hybrid():
-    from src.find_reviewers_hybrid import hybrid_recommendation
-    return hybrid_recommendation
-
-@st.cache_resource
-def load_topic():
-    from src.find_reviewers_topic import find_top_reviewers_topic
-    return find_top_reviewers_topic
+def load_models():
+    from src.find_reviewers import find_top_reviewers as tfidf
+    from src.find_reviewers_semantic import find_top_reviewers as semantic
+    from src.find_reviewers_hybrid import hybrid_recommendation as hybrid
+    from src.find_reviewers_topic import find_top_reviewers_topic as topic
+    return tfidf, semantic, hybrid, topic
 
 # -----------------------------------------------
 # 🧠 Run Model Wrapper
 # -----------------------------------------------
 def run_model(model_choice: str, query_text: str, alpha: float = 0.4) -> pd.DataFrame:
     try:
+        tfidf, semantic, hybrid, topic = load_models()  # PERF: Unified model loading to avoid redundant caching
         model = None
         if model_choice == "TF-IDF":
-            model = load_tfidf()
+            model = tfidf
         elif model_choice == "Semantic (E5)":
-            model = load_semantic()
+            model = semantic
         elif model_choice == "Topic (LDA/NMF)":
-            model = load_topic()
+            model = topic
         elif model_choice == "Hybrid":
-            model = load_hybrid()
+            model = hybrid
         else:
             st.error("⚠️ Unknown model selected.")
             return pd.DataFrame()
@@ -135,12 +126,9 @@ if st.session_state.uploaded_pdf is not None:
     save_path = TEST_PDF_DIR / pdf_file.name
 
     try:
-        with open(save_path, "wb") as f:
-            f.write(pdf_file.getbuffer())
-        st.success(f"✅ Saved PDF → `{save_path.name}`")
-
-        reader = PdfReader(save_path)
-        extracted_text = "\n".join([page.extract_text() or "" for page in reader.pages])
+        with io.BytesIO(pdf_file.getbuffer()) as f:  # PERF: Use in-memory buffer instead of writing to disk
+            reader = PdfReader(f)
+            extracted_text = "\n".join(page.extract_text() or "" for page in reader.pages)  # PERF: Use generator expression for memory efficiency
 
         if not st.session_state.query_text.strip():
             st.session_state.query_text = extracted_text
@@ -181,7 +169,7 @@ if run_clicked:
         if not results.empty:
             st.success("✅ Matching complete!")
             st.subheader("🎯 Top Matching Reviewers")
-            results["similarity"] = results["similarity"].apply(lambda x: f"{x:.3f}" if isinstance(x, (int, float)) else x)
+            results["similarity"] = results["similarity"].map("{:.3f}".format)  # PERF: Vectorized string formatting
             st.dataframe(results, use_container_width=True)
         else:
             st.info("ℹ️ No matching reviewers found.")
@@ -197,13 +185,16 @@ if st.button("🧪 Evaluate All Models"):
 
     try:
         with st.spinner("Running evaluation across all models..."):
-            tfidf_df, sem_df, hyb_df, topic_df, corr_df, figs = run_full_evaluation(
-                pdf_dir=str(TEST_PDF_DIR),
-                k=5,
-                top_k_export=10,
-                return_results=True,
-                show_plots=False,
-            )
+            with ThreadPoolExecutor() as executor:  # PERF: Use concurrent execution for model evaluations
+                future = executor.submit(
+                    run_full_evaluation,
+                    pdf_dir=str(TEST_PDF_DIR),
+                    k=5,
+                    top_k_export=10,
+                    return_results=True,
+                    show_plots=False,
+                )
+                tfidf_df, sem_df, hyb_df, topic_df, corr_df, figs = future.result()
 
         st.success("✅ Evaluation complete!")
 

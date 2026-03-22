@@ -4,6 +4,7 @@ import json
 from tqdm import tqdm
 import csv
 import os
+from functools import lru_cache
 
 # -----------------------------------
 # CONFIG
@@ -32,11 +33,9 @@ def load_meta(meta_path: Path) -> pd.DataFrame:
 
     # Normalize column names
     df.columns = [c.strip().lower() for c in df.columns]
-    # Retain only expected columns
-    df = df[[c for c in df.columns if c in EXPECTED_COLS]]
-    df = df.dropna(subset=["json_path"])
+    # PERF: Combined column filtering and NaN dropping
+    df = df[[c for c in df.columns if c in EXPECTED_COLS]].dropna(subset=["json_path"])
     return df
-
 
 # -----------------------------------
 # MAIN LOADER
@@ -45,8 +44,9 @@ def load_parsed_corpus(meta_path=META_FILE):
     """Load successfully parsed papers into a structured DataFrame."""
     df_meta = load_meta(meta_path)
 
-    # ✅ Filter for 'success' instead of 'parsed'
-    df_meta = df_meta[df_meta["status"].str.contains("success", case=False, na=False)]
+    # PERF: Preprocess 'status' column to lowercase once
+    df_meta["status"] = df_meta["status"].str.lower()
+    df_meta = df_meta[df_meta["status"].str.contains("success", na=False)]
 
     # Normalize Windows paths to POSIX (forward slashes)
     df_meta["json_path"] = df_meta["json_path"].str.replace("\\", "/", regex=False)
@@ -57,8 +57,9 @@ def load_parsed_corpus(meta_path=META_FILE):
     for _, row in tqdm(df_meta.iterrows(), total=len(df_meta), desc="Loading parsed JSONs"):
         json_path = Path(str(row["json_path"]).strip())
 
-        # Auto-correct missing or relative JSON paths
-        if not json_path.exists():
+        # PERF: Store the result of the first existence check
+        json_exists = json_path.exists()
+        if not json_exists:
             alt_path = base / json_path.name
             if alt_path.exists():
                 json_path = alt_path
@@ -70,11 +71,8 @@ def load_parsed_corpus(meta_path=META_FILE):
             with open(json_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
 
-            # Combine relevant text
-            title = data.get("title", "")
-            abstract = data.get("abstract", "")
-            body = data.get("body", "")
-            text = (title + " " + abstract + " " + body).strip()
+            # PERF: Use str.join() for concatenation
+            text = " ".join(filter(None, [data.get("title", ""), data.get("abstract", ""), data.get("body", "")])).strip()
 
             if len(text) < 100:
                 continue  # skip tiny documents
@@ -82,9 +80,9 @@ def load_parsed_corpus(meta_path=META_FILE):
             records.append({
                 "author_id": row.get("author_id", ""),
                 "paper_id": row.get("paper_id", json_path.stem),
-                "title": title,
-                "abstract": abstract,
-                "body": body,
+                "title": data.get("title", ""),
+                "abstract": data.get("abstract", ""),
+                "body": data.get("body", ""),
                 "text": text,
                 "path": str(json_path)
             })
@@ -92,10 +90,10 @@ def load_parsed_corpus(meta_path=META_FILE):
         except Exception as e:
             print(f"❌ Error reading {json_path.name}: {e}")
 
-    df = pd.DataFrame(records)
+    # PERF: Use pd.DataFrame.from_records() for better performance
+    df = pd.DataFrame.from_records(records)
     print(f"\n✅ Loaded {len(df)} valid parsed papers out of {len(df_meta)}")
     return df
-
 
 # -----------------------------------
 # RUN MODULE
