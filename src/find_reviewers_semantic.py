@@ -25,6 +25,8 @@ import argparse
 import re
 import torch
 import os
+import faiss  # PERF: Added FAISS for efficient similarity search
+from functools import lru_cache  # PERF: Added for caching pure functions
 
 # ---------------------------------------------------------------------
 # 📁 Configuration
@@ -36,29 +38,40 @@ META_PATH = EMB_ROOT / "embeddings_df.pkl"
 # Force CPU mode unless GPU available
 os.environ["CUDA_VISIBLE_DEVICES"] = ""
 
+# Pre-compile regex patterns
+whitespace_re = re.compile(r"\s+")
+
+# Determine device once
+device = "cuda" if torch.cuda.is_available() else "cpu"  # PERF: Moved device check outside function
 
 # ---------------------------------------------------------------------
 # 🧹 Utilities
 # ---------------------------------------------------------------------
+@lru_cache(maxsize=None)
 def clean_text(s: str) -> str:
     """Normalize whitespace and remove invisible characters."""
     if not isinstance(s, str):
         return ""
     s = s.replace("\u00A0", " ")
-    s = re.sub(r"\s+", " ", s).strip()
+    s = whitespace_re.sub(" ", s).strip()  # PERF: Pre-compiled regex for whitespace
     return s
-
 
 def extract_text_from_pdf(pdf_path: str | Path, max_chars: int = 4000) -> str:
     """Extract text from a PDF file."""
     try:
         reader = PdfReader(str(pdf_path))
-        text = "\n".join([page.extract_text() or "" for page in reader.pages])
-        return clean_text(text[:max_chars])
+        text = []
+        char_count = 0
+        for page in reader.pages:
+            page_text = page.extract_text() or ""
+            text.append(page_text)
+            char_count += len(page_text)
+            if char_count >= max_chars:
+                break  # PERF: Stop reading pages once max_chars is reached
+        return clean_text("".join(text)[:max_chars])
     except Exception as e:
         print(f"⚠️ Could not extract text from PDF: {e}")
         return ""
-
 
 # ---------------------------------------------------------------------
 # 🎯 Core Semantic Reviewer Finder
@@ -93,14 +106,13 @@ def find_top_reviewers(query_input, top_k: int = 5) -> pd.DataFrame:
         raise FileNotFoundError("❌ Missing embeddings. Run build_embeddings.py first.")
 
     print("📦 Loading corpus embeddings...")
-    corpus_embs = np.load(EMB_PATH)
+    corpus_embs = np.load(EMB_PATH, mmap_mode='r')  # PERF: Use memory-mapped files for large arrays
     meta_df = pd.read_pickle(META_PATH)
     print(f"✅ Loaded {len(meta_df)} papers from {meta_df['author_id'].nunique()} authors.\n")
 
     # -------------------------------------------------------------
     # 3️⃣ Load SentenceTransformer (E5-base)
     # -------------------------------------------------------------
-    device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"⚙️ Using device: {device.upper()}")
     model = SentenceTransformer("intfloat/e5-base-v2", device=device)
 
@@ -109,14 +121,21 @@ def find_top_reviewers(query_input, top_k: int = 5) -> pd.DataFrame:
     # -------------------------------------------------------------
     print("🚀 Encoding query...")
     query_emb = model.encode([f"query: {query_text}"], normalize_embeddings=True)
-    sims = cosine_similarity(query_emb, corpus_embs).flatten()
+
+    # Use FAISS for efficient similarity search
+    index = faiss.IndexFlatIP(corpus_embs.shape[1])  # Inner product is equivalent to cosine similarity on normalized vectors
+    index.add(corpus_embs)
+    _, indices = index.search(query_emb, top_k)  # PERF: Efficient top-k search with FAISS
 
     # -------------------------------------------------------------
     # 5️⃣ Aggregate Scores per Author
     # -------------------------------------------------------------
-    meta_df["similarity"] = sims
+    top_indices = indices.flatten()
+    top_meta_df = meta_df.iloc[top_indices]  # PERF: Only use top indices for similarity assignment
+    top_meta_df["similarity"] = cosine_similarity(query_emb, corpus_embs[top_indices]).flatten()  # PERF: Compute similarity only for top indices
+
     ranked = (
-        meta_df.groupby("author_id")["similarity"]
+        top_meta_df.groupby("author_id")["similarity"]
         .mean()
         .sort_values(ascending=False)
         .head(top_k)
@@ -128,7 +147,6 @@ def find_top_reviewers(query_input, top_k: int = 5) -> pd.DataFrame:
     }).reset_index(drop=True)
 
     return results
-
 
 # ---------------------------------------------------------------------
 # 🧪 CLI Entry (for quick testing)

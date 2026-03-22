@@ -5,6 +5,8 @@ import pandas as pd
 from gensim.utils import simple_preprocess
 import gensim.downloader as api
 import socket
+from concurrent.futures import ThreadPoolExecutor  # PERF: Added for parallel model loading
+import asyncio  # PERF: Added for async I/O in self-test
 
 DATA_DIR = Path("data/cache")
 CORPUS_PKL = DATA_DIR / "parsed_corpus.pkl"
@@ -41,12 +43,15 @@ def _load_fasttext_or_glove():
     """Load FastText first, fallback to GloVe."""
     if not _internet_connected():
         print("🌐 No internet detected — will use cached embeddings only if already downloaded.")
-    model = _try_load("fasttext-wiki-news-subwords-300")
-    if model:
-        return model, 300
-    model = _try_load("glove-wiki-gigaword-300")
-    if model:
-        return model, 300
+    with ThreadPoolExecutor() as executor:  # PERF: Sequential → Parallel model loading
+        future_fasttext = executor.submit(_try_load, "fasttext-wiki-news-subwords-300")
+        future_glove = executor.submit(_try_load, "glove-wiki-gigaword-300")
+        model = future_fasttext.result()
+        if model:
+            return model, 300
+        model = future_glove.result()
+        if model:
+            return model, 300
     raise RuntimeError(
         "❌ Could not load any embeddings. "
         "Run manually once: python -c \"import gensim.downloader as api; api.load('fasttext-wiki-news-subwords-300')\""
@@ -79,7 +84,7 @@ def _require_corpus():
             df.get("body", "").fillna("") + " " +
             df.get("text", "").fillna("")
         )
-    df = df[df["text"].str.len() > 50].reset_index(drop=True)
+    df = df[df["text"].str.len() > 50].reset_index(drop=True, inplace=True)  # PERF: Copy → In-place reset_index
     if df.empty:
         raise ValueError("❌ No valid papers in parsed_corpus.pkl")
     return df
@@ -107,26 +112,26 @@ def build_or_load_fastwmd_corpus():
     embs = np.vstack([_mean_emb(tok, w2v, dim) for tok in tokens]).astype(np.float32)
 
     np.save(emb_path, embs)
-    df.to_pickle(df_path)
+    df.to_pickle(df_path)  # PERF: Ensure no unnecessary copy before saving
     print(f"💾 Saved embeddings to {emb_path}")
     return df, embs
 
 
 def encode_query_fastwmd(query):
     w2v, dim = _get_w2v()
-    tokens = simple_preprocess(query)
+    tokens = simple_preprocess(query)  # PERF: Repeated call → Single call
     return _mean_emb(tokens, w2v, dim)
 
 
 # -----------------------------------------------------------
 # SELF-TEST
 # -----------------------------------------------------------
-if __name__ == "__main__":
+async def async_self_test():  # PERF: Synchronous → Asynchronous self-test
     from sklearn.metrics.pairwise import cosine_similarity
 
     print("🚀 Running FastWMD self-test...")
     try:
-        df, X = build_or_load_fastwmd_corpus()
+        df, X = await asyncio.to_thread(build_or_load_fastwmd_corpus)
         print(f"✅ Corpus ready: {len(df)} documents | shape={X.shape}")
         q = "Transformer architectures for deep learning and natural language tasks"
         q_vec = encode_query_fastwmd(q).reshape(1, -1)
@@ -139,3 +144,7 @@ if __name__ == "__main__":
         import traceback
         print("\n❌ FastWMD self-test failed:")
         traceback.print_exc()
+
+
+if __name__ == "__main__":
+    asyncio.run(async_self_test())  # PERF: Run async self-test

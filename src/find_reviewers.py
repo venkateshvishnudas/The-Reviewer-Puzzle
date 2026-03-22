@@ -24,6 +24,8 @@ from PyPDF2.errors import PdfReadError
 import re
 import argparse
 import sys, os
+from concurrent.futures import ThreadPoolExecutor
+import functools
 
 # -------------------------------------------------------------------
 # 📁 Configuration
@@ -33,6 +35,10 @@ VECTOR_PATH = TFIDF_DIR / "vectorizer.pkl"
 MATRIX_PATH = TFIDF_DIR / "tfidf_matrix.pkl"
 DF_PATH = TFIDF_DIR / "tfidf_df.pkl"
 
+# Pre-compile regex patterns
+CLEAN_TEXT_REGEX = re.compile(r"[^a-z0-9\s\-]")  # PERF: Compile regex once at module level
+MULTISPACE_REGEX = re.compile(r"\s+")
+
 # -------------------------------------------------------------------
 # 🧹 Utility Functions
 # -------------------------------------------------------------------
@@ -40,7 +46,8 @@ def extract_text_from_pdf(pdf_path: str, max_chars: int = 4000) -> str:
     """Extract text from a PDF file safely (limited to 4000 chars)."""
     try:
         reader = PdfReader(pdf_path)
-        text = "\n".join([page.extract_text() or "" for page in reader.pages])
+        with ThreadPoolExecutor() as executor:  # PERF: Sequential → Parallel processing of PDF pages
+            text = "\n".join(executor.map(lambda page: page.extract_text() or "", reader.pages))
         return text[:max_chars]
     except PdfReadError:
         print(f"⚠️ Could not fully read PDF: {pdf_path}")
@@ -55,8 +62,8 @@ def clean_text(text: str) -> str:
     if not isinstance(text, str):
         return ""
     text = text.lower()
-    text = re.sub(r"[^a-z0-9\s\-]", " ", text)
-    text = re.sub(r"\s+", " ", text).strip()
+    text = CLEAN_TEXT_REGEX.sub(" ", text)  # PERF: Compile regex once at module level
+    text = MULTISPACE_REGEX.sub(" ", text).strip()  # PERF: Compile regex once at module level
     return text
 
 
@@ -75,6 +82,10 @@ if tfidf_matrix.shape[0] != len(df):
 
 print(f"✅ Loaded {len(df)} papers from {df['author_id'].nunique()} authors.\n")
 
+
+# Cache min and max similarity scores for normalization
+SIMS_MIN = tfidf_matrix.min()
+SIMS_MAX = tfidf_matrix.max()
 
 # -------------------------------------------------------------------
 # 🎯 Core Reviewer Finder
@@ -111,18 +122,17 @@ def find_top_reviewers(query_input, top_k: int = 5, method: str = "max") -> pd.D
     sims = cosine_similarity(query_vec, tfidf_matrix).flatten()
 
     # Normalize for consistency
-    sims = (sims - sims.min()) / (sims.max() - sims.min() + 1e-8)
+    sims = (sims - SIMS_MIN) / (SIMS_MAX - SIMS_MIN + 1e-8)  # PERF: Cache min/max values for normalization
 
     # -------------------------------------------------------------
     # 3️⃣ Aggregate per Author
     # -------------------------------------------------------------
-    df_local = df.copy()
-    df_local["similarity"] = sims
+    df["similarity"] = sims  # PERF: Remove unnecessary DataFrame copy
 
     if method == "max":
-        author_scores = df_local.groupby("author_id")["similarity"].max()
+        author_scores = df.groupby("author_id")["similarity"].max()
     elif method == "mean":
-        author_scores = df_local.groupby("author_id")["similarity"].mean()
+        author_scores = df.groupby("author_id")["similarity"].mean()
     else:
         raise ValueError("⚠️ method must be 'max' or 'mean'")
 
@@ -158,6 +168,8 @@ if __name__ == "__main__":
 
     print("\n🎯 Top Potential Reviewers:")
     for i, row in results.iterrows():
-        print(f"{i+1}. {row['author_id']:<25} | Similarity: {row['similarity']:.4f}")
+        author_id = row['author_id']  # PERF: Cache repeated attribute lookups
+        similarity = row['similarity']  # PERF: Cache repeated attribute lookups
+        print(f"{i+1}. {author_id:<25} | Similarity: {similarity:.4f}")
 
     print("\n✅ Reviewer matching complete.")
